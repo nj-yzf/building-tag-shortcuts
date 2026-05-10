@@ -1,0 +1,6 @@
+GPL-2.0-or-later
+
+This project is intended to be used as a local JOSM plugin. JOSM itself is
+licensed under GPL-2.0-or-later, and JOSM plugins are expected to be compatible
+with that license.
+
