@@ -1,0 +1,8 @@
+build/
+backups/
+dist/
+lib/josm-tested.jar
+.tools/
+*.class
+*.jar
+!dist/.gitkeep
