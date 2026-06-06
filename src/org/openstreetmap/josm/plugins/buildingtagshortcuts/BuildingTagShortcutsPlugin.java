@@ -13,9 +13,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 import javax.swing.DefaultComboBoxModel;
@@ -33,7 +35,10 @@ import javax.swing.JScrollPane;
 import javax.swing.JSeparator;
 import javax.swing.KeyStroke;
 import javax.swing.ListSelectionModel;
+import javax.swing.SwingUtilities;
 import javax.swing.WindowConstants;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.text.JTextComponent;
 
 import org.openstreetmap.josm.actions.JosmAction;
@@ -43,6 +48,7 @@ import org.openstreetmap.josm.command.SequenceCommand;
 import org.openstreetmap.josm.data.UndoRedoHandler;
 import org.openstreetmap.josm.data.osm.DataSet;
 import org.openstreetmap.josm.data.osm.OsmPrimitive;
+import org.openstreetmap.josm.data.osm.PrimitiveData;
 import org.openstreetmap.josm.gui.MainApplication;
 import org.openstreetmap.josm.gui.MainMenu;
 import org.openstreetmap.josm.gui.Notification;
@@ -79,12 +85,14 @@ public class BuildingTagShortcutsPlugin extends Plugin {
     private static final String PREF_UPPER_LEVEL_HEIGHT = "buildingtagshortcuts.height.upper-level-height";
     private static final String PREF_TOTAL_LEVELS = "buildingtagshortcuts.height.total-levels";
     private static final double DEFAULT_LEVEL_HEIGHT = 3.6;
+    private static final double LEVEL_COUNT_STEP = 0.5;
     private static final int COMPACT_FIELD_COLUMNS = 5;
     private static final SetLevelsAction[] LEVEL_ACTIONS = new SetLevelsAction[10];
     private static ToggleBuildingPartAction toggleAction;
     private static OpenHeightToolAction openHeightToolAction;
     private static HeightToolDialog heightToolDialog;
     private static boolean keyDispatcherRegistered;
+    private static WheelHeightCommand activeWheelHeightCommand;
 
     /**
      * Constructs the plugin and registers menu actions.
@@ -505,28 +513,49 @@ public class BuildingTagShortcutsPlugin extends Plugin {
             heightToolDialog = new HeightToolDialog(support);
         }
         heightToolDialog.refreshFromSelection();
+        heightToolDialog.applyDefaultSimpleHeightOnOpen();
         heightToolDialog.setVisible(true);
         heightToolDialog.toFront();
     }
 
     private static void applySimpleHeightFromLevels(BuildingSelectionAction support, String levelHeightText) {
+        applySimpleHeightFromLevels(support, levelHeightText, true);
+    }
+
+    private static void applySimpleHeightFromLevels(BuildingSelectionAction support,
+            String levelHeightText, boolean showMessages) {
+        applySimpleHeightFromLevels(support, levelHeightText, showMessages, false);
+    }
+
+    private static void applySimpleHeightFromLevels(BuildingSelectionAction support,
+            String levelHeightText, boolean showMessages, boolean mergeWheelUndo) {
         Double levelHeight = parsePositiveNumber(levelHeightText);
         if (levelHeight == null) {
-            showWarning("Enter a valid positive per-level height.");
+            if (showMessages) {
+                showWarning("Enter a valid positive per-level height.");
+            }
             return;
         }
 
         Config.getPref().put(PREF_SIMPLE_LEVEL_HEIGHT, formatHeight(levelHeight));
-        applySimpleHeightFromLevelsWithMultiplier(support, levelHeight);
+        applySimpleHeightFromLevelsWithMultiplier(support, levelHeight, showMessages, mergeWheelUndo);
     }
 
-    private static void applySimpleHeightFromLevelsWithMultiplier(BuildingSelectionAction support, double levelHeight) {
+    private static void applySimpleHeightFromLevelsWithMultiplier(BuildingSelectionAction support,
+            double levelHeight, boolean showMessages) {
+        applySimpleHeightFromLevelsWithMultiplier(support, levelHeight, showMessages, false);
+    }
+
+    private static void applySimpleHeightFromLevelsWithMultiplier(BuildingSelectionAction support,
+            double levelHeight, boolean showMessages, boolean mergeWheelUndo) {
         Collection<OsmPrimitive> selection = support.getSelection();
         if (selection == null || !support.confirmOutlying(selection)) {
             return;
         }
 
         List<Command> commands = new ArrayList<>();
+        Map<OsmPrimitive, Map<String, String>> finalTags = new LinkedHashMap<>();
+        int eligible = 0;
         int changed = 0;
         int skippedInvalid = 0;
         int minHeightChanged = 0;
@@ -543,6 +572,7 @@ public class BuildingTagShortcutsPlugin extends Plugin {
                 skippedInvalid++;
                 continue;
             }
+            eligible++;
 
             double height = levelHeight * levels;
             Double roofHeight = parsePositiveNumber(primitive.get(ROOF_HEIGHT));
@@ -551,17 +581,26 @@ public class BuildingTagShortcutsPlugin extends Plugin {
                 roofHeightAdded++;
             }
 
-            commands.add(changeTag(primitive, HEIGHT, formatHeight(height)));
-            changed++;
+            if (addTagChange(commands, finalTags, primitive, HEIGHT, formatHeight(height))) {
+                changed++;
+            }
 
             Double minLevel = parsePositiveNumber(primitive.get(BUILDING_MIN_LEVEL));
             if (minLevel != null) {
-                commands.add(changeTag(primitive, MIN_HEIGHT, formatHeight(levelHeight * minLevel)));
-                minHeightChanged++;
+                if (addTagChange(commands, finalTags, primitive, MIN_HEIGHT, formatHeight(levelHeight * minLevel))) {
+                    minHeightChanged++;
+                }
             }
         }
 
         if (commands.isEmpty()) {
+            if (!showMessages) {
+                return;
+            }
+            if (eligible > 0) {
+                showInfo("Height tags are already up to date.");
+                return;
+            }
             if (skippedInvalid > 0) {
                 showWarning("No height changed. " + skippedInvalid
                         + " object(s) have invalid building:levels values.");
@@ -571,7 +610,10 @@ public class BuildingTagShortcutsPlugin extends Plugin {
             return;
         }
 
-        UndoRedoHandler.getInstance().add(new SequenceCommand("Set height from building:levels", commands));
+        addHeightCommand("Set height from building:levels", commands, selection, finalTags, mergeWheelUndo);
+        if (!showMessages) {
+            return;
+        }
         String message = "Set height on " + changed + " object(s).";
         if (minHeightChanged > 0) {
             message += " Set min_height on " + minHeightChanged + " object(s).";
@@ -586,10 +628,28 @@ public class BuildingTagShortcutsPlugin extends Plugin {
             String lowerLevelsText, String lowerHeightText,
             String upperLevelsText, String upperHeightText,
             String totalLevelsText) {
+        applySegmentHeight(support, lowerLevelsText, lowerHeightText, upperLevelsText, upperHeightText,
+                totalLevelsText, true);
+    }
+
+    private static void applySegmentHeight(BuildingSelectionAction support,
+            String lowerLevelsText, String lowerHeightText,
+            String upperLevelsText, String upperHeightText,
+            String totalLevelsText, boolean showMessages) {
+        applySegmentHeight(support, lowerLevelsText, lowerHeightText, upperLevelsText, upperHeightText,
+                totalLevelsText, showMessages, false);
+    }
+
+    private static void applySegmentHeight(BuildingSelectionAction support,
+            String lowerLevelsText, String lowerHeightText,
+            String upperLevelsText, String upperHeightText,
+            String totalLevelsText, boolean showMessages, boolean mergeWheelUndo) {
         Double lowerHeight = parsePositiveNumber(lowerHeightText);
         Double upperHeight = parsePositiveNumber(upperHeightText);
         if (lowerHeight == null || upperHeight == null) {
-            showWarning("Enter valid positive lower and upper level heights.");
+            if (showMessages) {
+                showWarning("Enter valid positive lower and upper level heights.");
+            }
             return;
         }
 
@@ -602,7 +662,9 @@ public class BuildingTagShortcutsPlugin extends Plugin {
         knownLevelCounts += upperLevels == null ? 0 : 1;
         knownLevelCounts += totalLevels == null ? 0 : 1;
         if (knownLevelCounts < 2) {
-            showWarning("Enter at least two of lower levels, upper levels, and total levels.");
+            if (showMessages) {
+                showWarning("Enter at least two of lower levels, upper levels, and total levels.");
+            }
             return;
         }
 
@@ -616,18 +678,22 @@ public class BuildingTagShortcutsPlugin extends Plugin {
 
         if (lowerLevels == null || upperLevels == null || totalLevels == null
                 || lowerLevels <= 0 || upperLevels <= 0 || totalLevels <= 0) {
-            showWarning("Computed level counts must be positive.");
+            if (showMessages) {
+                showWarning("Computed level counts must be positive.");
+            }
             return;
         }
 
         double tolerance = 0.000001;
         if (Math.abs((lowerLevels + upperLevels) - totalLevels) > tolerance) {
-            showWarning("Lower levels plus upper levels must equal total levels.");
+            if (showMessages) {
+                showWarning("Lower levels plus upper levels must equal total levels.");
+            }
             return;
         }
 
         double height = lowerLevels * lowerHeight + upperLevels * upperHeight;
-        setSegmentHeightOnSelection(support, height, totalLevels);
+        setSegmentHeightOnSelection(support, height, totalLevels, showMessages, mergeWheelUndo);
 
         Config.getPref().put(PREF_LOWER_LEVELS, formatHeight(lowerLevels));
         Config.getPref().put(PREF_LOWER_LEVEL_HEIGHT, formatHeight(lowerHeight));
@@ -646,18 +712,33 @@ public class BuildingTagShortcutsPlugin extends Plugin {
         showInfo("Set height=" + formatHeight(height) + " on " + selection.size() + " object(s).");
     }
 
-    private static void setSegmentHeightOnSelection(BuildingSelectionAction support, double height, double totalLevels) {
+    private static void setSegmentHeightOnSelection(BuildingSelectionAction support,
+            double height, double totalLevels, boolean showMessages) {
+        setSegmentHeightOnSelection(support, height, totalLevels, showMessages, false);
+    }
+
+    private static void setSegmentHeightOnSelection(BuildingSelectionAction support,
+            double height, double totalLevels, boolean showMessages, boolean mergeWheelUndo) {
         Collection<OsmPrimitive> selection = support.getSelection();
         if (selection == null || !support.confirmOutlying(selection)) {
             return;
         }
 
         List<Command> commands = new ArrayList<>();
-        commands.add(new ChangePropertyCommand(selection, HEIGHT, formatHeight(height)));
-        commands.add(new ChangePropertyCommand(selection, BUILDING_LEVELS, formatHeight(totalLevels)));
-        UndoRedoHandler.getInstance().add(new SequenceCommand("Set segmented building height", commands));
-        showInfo("Set height=" + formatHeight(height) + " and building:levels="
-                + formatHeight(totalLevels) + " on " + selection.size() + " object(s).");
+        Map<OsmPrimitive, Map<String, String>> finalTags = new LinkedHashMap<>();
+        addSelectionTagChange(commands, finalTags, selection, HEIGHT, formatHeight(height));
+        addSelectionTagChange(commands, finalTags, selection, BUILDING_LEVELS, formatHeight(totalLevels));
+        if (commands.isEmpty()) {
+            if (showMessages) {
+                showInfo("Segmented height tags are already up to date.");
+            }
+            return;
+        }
+        addHeightCommand("Set segmented building height", commands, selection, finalTags, mergeWheelUndo);
+        if (showMessages) {
+            showInfo("Set height=" + formatHeight(height) + " and building:levels="
+                    + formatHeight(totalLevels) + " on " + selection.size() + " object(s).");
+        }
     }
 
     private static void setBuildingName(int number) {
@@ -681,11 +762,69 @@ public class BuildingTagShortcutsPlugin extends Plugin {
         return new ChangePropertyCommand(Collections.singleton(primitive), key, value);
     }
 
+    private static boolean addTagChange(List<Command> commands, Map<OsmPrimitive, Map<String, String>> finalTags,
+            OsmPrimitive primitive, String key, String value) {
+        if (value.equals(primitive.get(key))) {
+            return false;
+        }
+        commands.add(changeTag(primitive, key, value));
+        putFinalTag(finalTags, primitive, key, value);
+        return true;
+    }
+
+    private static boolean addSelectionTagChange(List<Command> commands,
+            Map<OsmPrimitive, Map<String, String>> finalTags,
+            Collection<OsmPrimitive> selection, String key, String value) {
+        boolean changed = false;
+        for (OsmPrimitive primitive : selection) {
+            if (!value.equals(primitive.get(key))) {
+                changed = true;
+                putFinalTag(finalTags, primitive, key, value);
+            }
+        }
+        if (changed) {
+            commands.add(new ChangePropertyCommand(selection, key, value));
+        }
+        return changed;
+    }
+
+    private static void putFinalTag(Map<OsmPrimitive, Map<String, String>> finalTags,
+            OsmPrimitive primitive, String key, String value) {
+        finalTags.computeIfAbsent(primitive, ignored -> new LinkedHashMap<>()).put(key, value);
+    }
+
+    private static void addHeightCommand(String description, List<Command> commands,
+            Collection<OsmPrimitive> selection, Map<OsmPrimitive, Map<String, String>> finalTags,
+            boolean mergeWheelUndo) {
+        if (!mergeWheelUndo) {
+            activeWheelHeightCommand = null;
+            UndoRedoHandler.getInstance().add(new SequenceCommand(description, commands));
+            return;
+        }
+
+        if (finalTags.isEmpty()) {
+            return;
+        }
+
+        Command lastCommand = UndoRedoHandler.getInstance().getLastCommand();
+        if (activeWheelHeightCommand != null
+                && lastCommand == activeWheelHeightCommand
+                && activeWheelHeightCommand.matches(selection)) {
+            activeWheelHeightCommand.updateFinalTags(finalTags);
+        } else {
+            activeWheelHeightCommand = new WheelHeightCommand(description, selection, finalTags);
+            UndoRedoHandler.getInstance().add(activeWheelHeightCommand);
+        }
+    }
+
     private static boolean isEmpty(String value) {
         return value == null || value.isEmpty();
     }
 
     private static Double parsePositiveNumber(String value) {
+        if (value == null) {
+            return null;
+        }
         try {
             double number = Double.parseDouble(value.trim());
             if (Double.isFinite(number) && number > 0) {
@@ -722,6 +861,86 @@ public class BuildingTagShortcutsPlugin extends Plugin {
         return suffix;
     }
 
+    private static final class WheelHeightCommand extends Command {
+        private final String description;
+        private final List<OsmPrimitive> primitives;
+        private final Map<OsmPrimitive, PrimitiveData> originalData = new LinkedHashMap<>();
+        private Map<OsmPrimitive, Map<String, String>> finalTags;
+
+        WheelHeightCommand(String description, Collection<OsmPrimitive> primitives,
+                Map<OsmPrimitive, Map<String, String>> finalTags) {
+            super(primitives.iterator().next().getDataSet());
+            this.description = description;
+            this.primitives = new ArrayList<>(primitives);
+            for (OsmPrimitive primitive : this.primitives) {
+                originalData.put(primitive, primitive.save());
+            }
+            this.finalTags = copyTags(finalTags);
+        }
+
+        boolean matches(Collection<OsmPrimitive> selection) {
+            return primitives.equals(new ArrayList<>(selection));
+        }
+
+        void updateFinalTags(Map<OsmPrimitive, Map<String, String>> tags) {
+            finalTags = copyTags(tags);
+            applyFinalTags();
+        }
+
+        @Override
+        public boolean executeCommand() {
+            super.executeCommand();
+            applyFinalTags();
+            return true;
+        }
+
+        @Override
+        public void undoCommand() {
+            for (Map.Entry<OsmPrimitive, PrimitiveData> entry : originalData.entrySet()) {
+                entry.getKey().load(entry.getValue());
+            }
+        }
+
+        @Override
+        public void fillModifiedData(Collection<OsmPrimitive> modified,
+                Collection<OsmPrimitive> deleted, Collection<OsmPrimitive> added) {
+            modified.addAll(primitives);
+        }
+
+        @Override
+        public String getDescriptionText() {
+            return description;
+        }
+
+        @Override
+        public Collection<? extends OsmPrimitive> getParticipatingPrimitives() {
+            return primitives;
+        }
+
+        private void applyFinalTags() {
+            for (Map.Entry<OsmPrimitive, Map<String, String>> entry : finalTags.entrySet()) {
+                OsmPrimitive primitive = entry.getKey();
+                for (Map.Entry<String, String> tag : entry.getValue().entrySet()) {
+                    String value = tag.getValue();
+                    if (value == null) {
+                        primitive.remove(tag.getKey());
+                    } else {
+                        primitive.put(tag.getKey(), value);
+                    }
+                }
+            }
+        }
+
+        private static Map<OsmPrimitive, Map<String, String>> copyTags(
+                Map<OsmPrimitive, Map<String, String>> tags) {
+            Map<OsmPrimitive, Map<String, String>> copy = new LinkedHashMap<>();
+            for (Map.Entry<OsmPrimitive, Map<String, String>> entry : tags.entrySet()) {
+                copy.put(entry.getKey(), new LinkedHashMap<>(entry.getValue()));
+            }
+            return copy;
+        }
+    }
+
     private static List<String> normalizeSuffixes(Collection<String> values) {
         Set<String> normalized = new LinkedHashSet<>();
         for (String value : values) {
@@ -747,6 +966,13 @@ public class BuildingTagShortcutsPlugin extends Plugin {
         private final JosmTextField upperLevelsField = new JosmTextField(COMPACT_FIELD_COLUMNS);
         private final JosmTextField upperHeightField = new JosmTextField(COMPACT_FIELD_COLUMNS);
         private final JosmTextField totalLevelsField = new JosmTextField(COMPACT_FIELD_COLUMNS);
+        private boolean suppressRealtimeApply;
+        private boolean realtimeApplyQueued;
+        private boolean simpleRealtimeDirty;
+        private boolean segmentRealtimeDirty;
+        private boolean simpleWheelDirty;
+        private boolean segmentWheelDirty;
+        private JosmTextField lastEditedSegmentLevelField;
 
         HeightToolDialog(BuildingSelectionAction support) {
             super(MainApplication.getMainFrame(), uiText("建筑高度工具", "Building Height Tool"), false);
@@ -758,10 +984,8 @@ public class BuildingTagShortcutsPlugin extends Plugin {
         }
 
         void refreshFromSelection() {
-            if (isEmpty(simpleLevelHeightField.getText())) {
-                simpleLevelHeightField.setText(Config.getPref().get(
-                        PREF_SIMPLE_LEVEL_HEIGHT, formatHeight(DEFAULT_LEVEL_HEIGHT)));
-            }
+            suppressRealtimeApply = true;
+            simpleLevelHeightField.setText(formatHeight(DEFAULT_LEVEL_HEIGHT));
             if (isEmpty(lowerHeightField.getText())) {
                 lowerHeightField.setText(Config.getPref().get(
                         PREF_LOWER_LEVEL_HEIGHT, formatHeight(DEFAULT_LEVEL_HEIGHT)));
@@ -770,18 +994,15 @@ public class BuildingTagShortcutsPlugin extends Plugin {
                 upperHeightField.setText(Config.getPref().get(
                         PREF_UPPER_LEVEL_HEIGHT, formatHeight(DEFAULT_LEVEL_HEIGHT)));
             }
-            if (isEmpty(lowerLevelsField.getText())) {
-                lowerLevelsField.setText(Config.getPref().get(PREF_LOWER_LEVELS, ""));
-            }
-            if (isEmpty(upperLevelsField.getText())) {
-                upperLevelsField.setText(Config.getPref().get(PREF_UPPER_LEVELS, ""));
-            }
-            if (isEmpty(totalLevelsField.getText())) {
-                String selectedLevels = getCommonSelectedBuildingLevels();
-                totalLevelsField.setText(isEmpty(selectedLevels)
-                        ? Config.getPref().get(PREF_TOTAL_LEVELS, "")
-                        : selectedLevels);
-            }
+            lowerLevelsField.setText("1");
+            upperLevelsField.setText("");
+            totalLevelsField.setText(getCommonSelectedBuildingLevels());
+            syncSegmentCountsFromTotal();
+            suppressRealtimeApply = false;
+        }
+
+        void applyDefaultSimpleHeightOnOpen() {
+            applySimpleHeightFromLevels(support, formatHeight(DEFAULT_LEVEL_HEIGHT), false);
         }
 
         private void buildGui() {
@@ -816,7 +1037,10 @@ public class BuildingTagShortcutsPlugin extends Plugin {
 
             JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
             JButton fillButton = new JButton(uiText("补全层数", "Fill count"));
-            fillButton.addActionListener(event -> fillMissingSegmentCount());
+            fillButton.addActionListener(event -> {
+                fillMissingSegmentCount();
+                applySegmentHeightRealtime();
+            });
             buttons.add(fillButton);
 
             JButton segmentedApplyButton = new JButton(uiText("应用分段高度", "Apply segmented"));
@@ -829,6 +1053,7 @@ public class BuildingTagShortcutsPlugin extends Plugin {
 
             content.add(buttons, GBC.eol().fill(GBC.HORIZONTAL));
             setContentPane(content);
+            addRealtimeHandlers();
         }
 
         private void addLabeledField(JPanel panel, String label, JosmTextField field,
@@ -840,6 +1065,8 @@ public class BuildingTagShortcutsPlugin extends Plugin {
                                 ? PREF_LOWER_LEVEL_HEIGHT : PREF_UPPER_LEVEL_HEIGHT,
                         formatHeight(DEFAULT_LEVEL_HEIGHT)));
                 addHeightWheel(field);
+            } else {
+                addLevelWheel(field);
             }
             if (endOfLine) {
                 panel.add(field, GBC.eol().anchor(GridBagConstraints.WEST).insets(0, 0, 8, 4));
@@ -853,50 +1080,218 @@ public class BuildingTagShortcutsPlugin extends Plugin {
             Double upper = parsePositiveNumber(upperLevelsField.getText());
             Double total = parsePositiveNumber(totalLevelsField.getText());
 
-            int known = 0;
-            known += lower == null ? 0 : 1;
-            known += upper == null ? 0 : 1;
-            known += total == null ? 0 : 1;
-            if (known < 2) {
-                showWarning("Enter at least two level counts first.");
+            if (total == null) {
+                showWarning("Enter total levels first.");
                 return;
             }
 
-            if (total == null) {
-                totalLevelsField.setText(formatHeight(lower + upper));
+            if (lower == null && upper == null) {
+                showWarning("Enter lower or upper levels first.");
             } else if (lower == null) {
                 double computed = total - upper;
                 if (computed <= 0) {
                     showWarning("Computed lower levels must be positive.");
                     return;
                 }
-                lowerLevelsField.setText(formatHeight(computed));
+                setFieldTextSilently(lowerLevelsField, formatHeight(computed));
             } else if (upper == null) {
                 double computed = total - lower;
                 if (computed <= 0) {
                     showWarning("Computed upper levels must be positive.");
                     return;
                 }
-                upperLevelsField.setText(formatHeight(computed));
+                setFieldTextSilently(upperLevelsField, formatHeight(computed));
             } else if (Math.abs((lower + upper) - total) > 0.000001) {
                 showWarning("Lower levels plus upper levels must equal total levels.");
             }
         }
 
         private void addHeightWheel(JosmTextField field) {
-            field.addMouseWheelListener(event -> adjustHeightField(field, event));
+            field.addMouseWheelListener(event -> adjustNumericField(field, event, 0.1, true));
         }
 
-        private void adjustHeightField(JosmTextField field, MouseWheelEvent event) {
-            double current = DEFAULT_LEVEL_HEIGHT;
+        private void addLevelWheel(JosmTextField field) {
+            field.addMouseWheelListener(event -> adjustNumericField(field, event, LEVEL_COUNT_STEP, false));
+        }
+
+        private void adjustNumericField(JosmTextField field, MouseWheelEvent event,
+                double step, boolean simpleMode) {
+            double current = step;
             Double parsed = parsePositiveNumber(field.getText());
             if (parsed != null) {
                 current = parsed;
             }
 
-            double adjusted = Math.max(0.1, current - event.getWheelRotation() * 0.1);
+            double adjusted = Math.max(step, current - event.getWheelRotation() * step);
+            if (simpleMode) {
+                simpleWheelDirty = true;
+            } else {
+                segmentWheelDirty = true;
+            }
             field.setText(formatHeight(adjusted));
             event.consume();
+        }
+
+        private void addRealtimeHandlers() {
+            addRealtimeHandler(simpleLevelHeightField, true);
+            addSegmentLevelHandler(lowerLevelsField);
+            addRealtimeHandler(lowerHeightField, false);
+            addSegmentLevelHandler(upperLevelsField);
+            addRealtimeHandler(upperHeightField, false);
+            addSegmentLevelHandler(totalLevelsField);
+        }
+
+        private void addRealtimeHandler(JosmTextField field, boolean simpleMode) {
+            field.getDocument().addDocumentListener(new DocumentListener() {
+                @Override
+                public void insertUpdate(DocumentEvent event) {
+                    run();
+                }
+
+                @Override
+                public void removeUpdate(DocumentEvent event) {
+                    run();
+                }
+
+                @Override
+                public void changedUpdate(DocumentEvent event) {
+                    run();
+                }
+
+                private void run() {
+                    if (!suppressRealtimeApply) {
+                        queueRealtimeApply(simpleMode);
+                    }
+                }
+            });
+        }
+
+        private void addSegmentLevelHandler(JosmTextField field) {
+            field.getDocument().addDocumentListener(new DocumentListener() {
+                @Override
+                public void insertUpdate(DocumentEvent event) {
+                    run();
+                }
+
+                @Override
+                public void removeUpdate(DocumentEvent event) {
+                    run();
+                }
+
+                @Override
+                public void changedUpdate(DocumentEvent event) {
+                    run();
+                }
+
+                private void run() {
+                    if (!suppressRealtimeApply) {
+                        lastEditedSegmentLevelField = field;
+                        queueRealtimeApply(false);
+                    }
+                }
+            });
+        }
+
+        private void queueRealtimeApply(boolean simpleMode) {
+            if (simpleMode) {
+                simpleRealtimeDirty = true;
+            } else {
+                segmentRealtimeDirty = true;
+            }
+            if (realtimeApplyQueued) {
+                return;
+            }
+
+            realtimeApplyQueued = true;
+            SwingUtilities.invokeLater(() -> {
+                realtimeApplyQueued = false;
+                if (!suppressRealtimeApply) {
+                    runQueuedRealtimeApply();
+                }
+            });
+        }
+
+        private void runQueuedRealtimeApply() {
+            boolean runSimple = simpleRealtimeDirty;
+            boolean runSegment = segmentRealtimeDirty;
+            boolean mergeSimpleWheel = simpleWheelDirty;
+            boolean mergeSegmentWheel = segmentWheelDirty;
+            simpleRealtimeDirty = false;
+            segmentRealtimeDirty = false;
+            simpleWheelDirty = false;
+            segmentWheelDirty = false;
+
+            if (runSegment) {
+                syncSegmentCountsFromTotal();
+                applySegmentHeightRealtime(mergeSegmentWheel);
+            }
+            if (runSimple) {
+                applySimpleHeightRealtime(mergeSimpleWheel);
+            }
+        }
+
+        private void syncSegmentCountsFromTotal() {
+            Double total = parsePositiveNumber(totalLevelsField.getText());
+            if (total == null) {
+                return;
+            }
+            if (total <= LEVEL_COUNT_STEP) {
+                return;
+            }
+
+            Double lower = parsePositiveNumber(lowerLevelsField.getText());
+            Double upper = parsePositiveNumber(upperLevelsField.getText());
+            if (lastEditedSegmentLevelField == upperLevelsField && upper != null) {
+                upper = clampSegmentLevel(upper, total);
+                setFieldTextSilently(upperLevelsField, formatHeight(upper));
+                double computedLower = total - upper;
+                setFieldTextSilently(lowerLevelsField, formatHeight(computedLower));
+            } else if (lower != null) {
+                lower = clampSegmentLevel(lower, total);
+                setFieldTextSilently(lowerLevelsField, formatHeight(lower));
+                double computedUpper = total - lower;
+                setFieldTextSilently(upperLevelsField, formatHeight(computedUpper));
+            } else if (upper != null) {
+                upper = clampSegmentLevel(upper, total);
+                setFieldTextSilently(upperLevelsField, formatHeight(upper));
+                double computedLower = total - upper;
+                setFieldTextSilently(lowerLevelsField, formatHeight(computedLower));
+            }
+        }
+
+        private double clampSegmentLevel(double value, double total) {
+            return Math.max(LEVEL_COUNT_STEP, Math.min(value, total - LEVEL_COUNT_STEP));
+        }
+
+        private void setFieldTextSilently(JosmTextField field, String value) {
+            if (value.equals(field.getText())) {
+                return;
+            }
+
+            boolean previous = suppressRealtimeApply;
+            suppressRealtimeApply = true;
+            field.setText(value);
+            suppressRealtimeApply = previous;
+        }
+
+        private void applySimpleHeightRealtime() {
+            applySimpleHeightRealtime(false);
+        }
+
+        private void applySimpleHeightRealtime(boolean mergeWheelUndo) {
+            applySimpleHeightFromLevels(support, simpleLevelHeightField.getText(), false, mergeWheelUndo);
+        }
+
+        private void applySegmentHeightRealtime() {
+            applySegmentHeightRealtime(false);
+        }
+
+        private void applySegmentHeightRealtime(boolean mergeWheelUndo) {
+            applySegmentHeight(
+                    support,
+                    lowerLevelsField.getText(), lowerHeightField.getText(),
+                    upperLevelsField.getText(), upperHeightField.getText(),
+                    totalLevelsField.getText(), false, mergeWheelUndo);
         }
 
         private String getCommonSelectedBuildingLevels() {

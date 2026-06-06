@@ -22,14 +22,24 @@ A small JOSM plugin for faster building edits:
 The Building Height Tool has two sections:
 
 - Simple mode: set or update `height=<per-level height>*building:levels` on selected objects.
-- Segmented mode: calculate height from lower levels/lower height, upper levels/upper height, and total levels. Enter any two of lower levels, upper levels, and total levels, then fill the missing count.
+- Segmented mode: calculate height from lower levels/lower height, upper levels/upper height, and total levels.
+
+Valid numeric edits in either section are applied to the selected objects immediately, including mouse-wheel changes, so JOSM 3D previews can update while you tune values.
+
+Each time the height tool is opened with `Ctrl+Shift+Q`, simple mode resets to `3.6` m and immediately applies that value to the current selection. If all selected objects share one valid `building:levels` value, that value is copied into segmented mode's total levels field. If selected objects have different `building:levels` values, total levels is left empty.
+
+In segmented mode, total levels is the master value. It can be set from `building:levels` or typed manually. Lower levels plus upper levels always equals total levels; changing lower levels updates upper levels, and changing upper levels updates lower levels.
+
+Segmented mode resets lower levels to `1` each time the tool opens. Segment level inputs are constrained so neither lower nor upper levels can exceed the total levels.
+
+Consecutive mouse-wheel realtime height changes on the same selection are grouped into one undo step. If the selection changes or another edit happens in between, the next wheel changes start a separate undo step.
 
 In simple mode only:
 
 - If `building:min_level` exists, the tool also writes `min_height=<per-level height>*building:min_level`.
 - If `roof:height` exists, the tool writes `height=<per-level height>*building:levels+roof:height`.
 
-Height fields default to `3.6` m and can be adjusted with the mouse wheel in `0.1` m steps.
+Height fields default to `3.6` m and can be adjusted with the mouse wheel in `0.1` m steps. Level-count fields also support mouse-wheel adjustment in `0.5` level steps.
 
 The height tool uses compact numeric fields and shows Chinese labels when the JOSM/default locale is Chinese.
 

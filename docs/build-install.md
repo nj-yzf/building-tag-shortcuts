@@ -103,14 +103,24 @@ The plugin should appear in the list after restart. Tick its checkbox if it is n
 The height tool has:
 
 - Simple mode: use a custom per-level height to calculate `height` from existing `building:levels`.
-- Segmented mode: calculate total height from lower levels/lower height and upper levels/upper height. Enter any two of lower levels, upper levels, and total levels to fill the missing count.
+- Segmented mode: calculate total height from lower levels/lower height and upper levels/upper height.
+
+Valid numeric edits in either mode apply immediately to the selected objects, including mouse-wheel changes, so JOSM 3D previews can update while values are being tuned.
+
+Opening the tool with `Ctrl+Shift+Q` resets simple mode to `3.6` m and applies it immediately. Segmented mode syncs total levels from selected `building:levels` only when all selected objects share the same valid value; mixed selected values leave total levels empty.
+
+In segmented mode, total levels is the master value and lower levels plus upper levels always equals it. Editing one segment count automatically updates the other segment count.
+
+Segmented mode resets lower levels to `1` whenever the tool opens, and segment counts are clamped so they cannot exceed total levels.
+
+Consecutive mouse-wheel realtime changes on the same selection are grouped into a single undo step. A changed selection or another intervening edit starts a new undo group.
 
 Simple mode also handles optional tags:
 
 - `building:min_level` -> `min_height=<per-level height>*building:min_level`
 - `roof:height` is added to the calculated `height`
 
-Height fields default to `3.6` m and support mouse-wheel adjustment in `0.1` m steps.
+Height fields default to `3.6` m and support mouse-wheel adjustment in `0.1` m steps. Level-count fields support mouse-wheel adjustment in `0.5` level steps.
 
 The height tool labels adapt to Chinese or English based on the default locale.
 

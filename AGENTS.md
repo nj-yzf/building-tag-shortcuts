@@ -13,6 +13,9 @@
 - Hold `Ctrl` and one digit, then press another digit to set two-digit building names such as `name=23栋`.
 - `Ctrl+Shift+D`: toggle selected objects between `building=*` and `building:part=*`, preserving the original value.
 - `Ctrl+Shift+Q`: open the Building Height Tool.
+- Building Height Tool numeric edits apply immediately to selected object tags in both simple and segmented modes, including mouse-wheel changes, for dynamic JOSM 3D preview.
+- Opening the Building Height Tool with `Ctrl+Shift+Q` resets simple mode to `3.6` m and immediately applies it to the current selection.
+- Segmented mode syncs total levels from selected `building:levels` only when all selected objects share one valid value; mixed values leave total levels empty.
 - JOSM preferences include a `Building Tag Shortcuts` page with configurable building-name suffixes.
 - Actions are also available under JOSM `Data -> Building Tag Shortcuts`.
 - The `1..9` and `Ctrl+Shift+D` shortcut set was user-verified as working well before the height feature was added.
@@ -22,6 +25,7 @@
 - Toggle selected objects between `building=*` and `building:part=*`, preserving the original value.
 - Calculate and write `height` through a GUI tool with simple and segmented modes.
 - In simple height mode, account for optional `building:min_level` and `roof:height`.
+- Apply height tool numeric changes in real time, including mouse-wheel updates.
 - Set building-number names with configurable suffixes such as `栋`, `幢`, and `号楼`.
 - Skip objects without `building:levels`.
 - Keep the workflow usable for a user without Java background.
@@ -36,6 +40,11 @@
 - Use `Plugin#getPreferenceSetting()` with `DefaultTabPreferenceSetting` and a non-null icon name to expose a top-level plugin settings page that can grow over time.
 - Use a reusable non-modal Swing `JDialog` for advanced height calculation.
 - Height tool UI uses compact numeric fields and `uiText(zh,en)` locale-adaptive labels.
+- Height tool realtime updates are silent while editing; explicit buttons still show warnings or completion messages.
+- Height fields use mouse-wheel step `0.1`; level-count fields use mouse-wheel step `0.5`.
+- In segmented height mode, total levels is the master value; lower and upper levels are kept in sync so their sum equals total levels.
+- Segmented height mode resets lower levels to `1` on each open and clamps segment counts so neither segment exceeds total levels.
+- Consecutive mouse-wheel realtime height changes on the same selection are grouped into one undo step; selection changes or intervening edits start a new group.
 - Documentation rule: keep existing English docs, and add/update separate Chinese versions for user-facing project docs.
 
 ## Shortcut Analysis
@@ -75,6 +84,13 @@
 - 2026-06-06: Upgraded `Ctrl+Shift+Q` from direct height writing to a Building Height Tool dialog with simple and segmented calculation modes.
 - 2026-06-06: Compacted the height tool layout and added Chinese/English adaptive labels.
 - 2026-06-06: Enhanced simple height mode to write `min_height` from `building:min_level` and add `roof:height` to `height`.
+- 2026-06-06: Fixed a simple height mode crash when optional tags such as `roof:height` or `building:min_level` are absent by making numeric parsing null-safe.
+- 2026-06-06: Added realtime height tool updates for simple and segmented numeric edits, plus `0.5`-step mouse-wheel support for level-count fields.
+- 2026-06-06: Changed height tool opening behavior to immediately apply default `3.6` m simple height, sync common selected `building:levels` into segmented total levels, and keep segmented lower/upper counts constrained by total levels.
+- 2026-06-06: Fixed segmented level-count realtime linking crash (`Attempt to mutate in notification`) by deferring document-listener updates with `SwingUtilities.invokeLater`.
+- 2026-06-06: Reset segmented lower levels to `1` on tool open and clamped lower/upper segment counts to stay within total levels.
+- 2026-06-06: Added a mergeable custom command for mouse-wheel realtime height changes so consecutive wheel edits on the same selection undo as one step.
+- 2026-06-06: Fixed wheel-merge height updates for multi-selection simple mode so each object keeps height calculated from its own `building:levels`.
 - 2026-06-06: Fixed two-digit input edge cases for second digit `0` and repeated digits via main-keyboard/numpad combinations.
 - 2026-06-06: Refined `Ctrl+Shift+D` multi-selection behavior for mixed building/building:part selections, untagged objects, and objects with both tags.
 
