@@ -3,18 +3,39 @@
 A small JOSM plugin for faster building edits:
 
 - `1` ... `9`: set `building:levels=1` ... `building:levels=9` on the current selection.
+- Hold one digit and press another digit to set two-digit levels, for example hold `1` and press `8` to update `building:levels` from `1` to `18`.
+- The second digit may be `0`, and repeated digits are supported by mixing main-keyboard and numpad keys, such as main `1` plus numpad `1` for `11`.
+- `Ctrl+1` ... `Ctrl+9`: set `name=1栋` ... `name=9栋` by default.
+- Hold `Ctrl` and one digit, then press another digit to set two-digit building names, for example `Ctrl+2` then `3` updates `name` from `2栋` to `23栋`.
+- Building-name two-digit input supports `0` as the second digit and repeated digits via main-keyboard/numpad combinations.
 - `Ctrl+Shift+D`: toggle selected objects between `building=*` and `building:part=*`, preserving the value.
-- `Ctrl+Shift+Q`: set or update `height=3.6*building:levels` on selected objects that already have `building:levels`.
+- `Ctrl+Shift+Q`: open the Building Height Tool.
 
-The toggle is per object. For example:
+`Ctrl+Shift+D` is multi-selection aware:
 
-- `building=yes` becomes `building:part=yes`
-- `building=apartments` becomes `building:part=apartments`
-- `building:part=yes` becomes `building=yes`
+- all selected objects are `building=*`: convert all to `building:part=*`
+- all selected objects are `building:part=*`: convert all to `building=*`
+- mixed `building=*` and `building:part=*`: convert only `building=*` objects; existing `building:part=*` objects stay unchanged
+- no `building` or `building:part`: add `building:part=yes`
+- both tags on one object: remove only `building=*`
 
-If both `building` and `building:part` exist on one selected object, the plugin treats `building` as the source and overwrites `building:part` with that value.
+The Building Height Tool has two sections:
 
-The height action skips selected objects without `building:levels` and skips invalid or non-positive level values.
+- Simple mode: set or update `height=<per-level height>*building:levels` on selected objects.
+- Segmented mode: calculate height from lower levels/lower height, upper levels/upper height, and total levels. Enter any two of lower levels, upper levels, and total levels, then fill the missing count.
+
+In simple mode only:
+
+- If `building:min_level` exists, the tool also writes `min_height=<per-level height>*building:min_level`.
+- If `roof:height` exists, the tool writes `height=<per-level height>*building:levels+roof:height`.
+
+Height fields default to `3.6` m and can be adjusted with the mouse wheel in `0.1` m steps.
+
+The height tool uses compact numeric fields and shows Chinese labels when the JOSM/default locale is Chinese.
+
+The building-name suffix is configurable in JOSM preferences. Defaults are `栋`, `幢`, and `号楼`, with `栋` selected by default.
+
+The settings page appears as a top-level item in JOSM preferences: `Edit -> Preferences -> Building Tag Shortcuts`.
 
 ## Shortcut Conflict
 
@@ -74,4 +95,4 @@ The actions are also available under JOSM's `Data` menu.
 
 ## Current Status
 
-The current installed build uses `1..9` for levels, `Ctrl+Shift+D` for toggling, and `Ctrl+Shift+Q` for height-from-levels. Older experimental shortcuts `Ctrl+Alt+L` and `Ctrl+Alt+B` are no longer used.
+The current installed build uses `1..9` and held two-digit combinations for levels, `Ctrl+digit` combinations for building names, `Ctrl+Shift+D` for toggling, and `Ctrl+Shift+Q` for the height tool. Older experimental shortcuts `Ctrl+Alt+L` and `Ctrl+Alt+B` are no longer used.
